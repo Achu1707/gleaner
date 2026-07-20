@@ -2030,6 +2030,8 @@ def all_fourier_calculations(total_rows, U, V, W, M):
     ak_list_W.append(ak_W)
     bk_list_W.append(bk_W)
 
+  # print ak_list_U, bk_list_U, ak_list_V, bk_list_V, ak_list_W, bk_list_W,
+
   for j in range(0, total_rows):
     # print "---------------\nIteration Number J = %d" %(j)
     for k in range(1, int((M - 1) / 2) + 1):

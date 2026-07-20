@@ -619,14 +619,15 @@ def spatial_reduction_in_db(sqlcon, tabname, columns, reduce_coord_column):
 
 
 def spatial_reduction_3d_to_2d_in_db(sqlcon, tabname, columns, reduce_coord_column):
-  """ (sqlite3.Connection, string, array of strings, string)
+  """ (sqlite3.Connection, string, array of strings, array of strings)
 
       Reduce columns with respect to reduce_coord_column.
       reduce_coord_column should contain any two column headers from ['coordX','coordY', 'coordZ']
       e.g ['coordX','coordZ']
 
-      Read data with 'columns' from 'sqlcon' under the table 'tabname' and
-      reduce those columns along 'reduce_coord_column'. Reduced columns are written
+      Read all the values under ‘reduce_coord_column’ and each target values of the 'columns' (header 
+      names) and computes average of each column values for each coordinate group. Reduced table 
+      where each row corresponds to unique coordinate values with averaged column values, are written 
       into 'sqlcon' under the table 'tabname'_red.
   """
   import numpy as np
@@ -1170,118 +1171,83 @@ def strong_efficiency(perfmap, total_size, ppn=1, ref_perf=None,
 ######################## Tracking muliple ASCII files to database ######################################################
 def tracking_multiple_data_to_db(dbname, input_files):
   """ (string, string or list of strings)
-      input_files are ASCII files containing instantaneous velocities which are tracked to the
-      database: dbname under each table for each ASCII file.
-
-      Returns sqlcon (a sqlite3.Connection) to the database: dbname and all_tab_names
-      consisting of all table names of the database
-  """
+      dbname is the name of the database and input_files are file names of ASCII files 
+      
+      Each ASCII file data is tracked to each table in the database. 
+      Returns sqlcon, a sqlite3.Connection to the database and all_tab_names, a list of all table names of the database
+  """ 
   from pathlib import Path
   import sqlite3
   logging.basicConfig(level=logging.INFO)
-  logger = logging.getLogger(__name__)
   import os
-
+  
   all_tab_names = []
   sqlcon = sqlite3.connect(dbname)
-  for file, i in zip(input_files, range(len(input_files))):
+  for file in input_files:
     indv_file = Path(file).stem
-    indv_file = indv_file.replace('_p00000', '')
     all_tab_names.append(indv_file)
-    try:
-      if os.path.isfile(dbname):
-        cur = sqlcon.cursor()
-        drop_existing(cur, tabname=indv_file)
-        logger.info(f'Adding data to the database: {dbname}')
-        sqlcon = tracking_to_db(fname=file, dbname=dbname, tabname=indv_file)
-
-    except Exception as e:
-      logger.error(f"Error processing file {file}: {str(e)}")
-    ## -------------------------------------------------------------------------- ##
-
-  return sqlcon, all_tab_names
+    logging.info(f'Tracking data from the file: {file} to the database: {dbname}')
+    sqlcon = tracking_to_db(fname=file, dbname=dbname, tabname=indv_file)
+  
+  return sqlcon, all_tab_names  
 ######################################################################################################################
 
 
 ########################## Statistical quantities calculation ###############################################
-def find_index_of_value_or_nearest(data, value, tolerance=1e-9):
-  """ (list, int or float)
+def find_index_of_value_or_nearest(data, value, tolerance):
+  """ (list, float, float)
       Finds the index of a specific value in a list.
       If the value is not found, it returns the index of the nearest value.
   """
 
-  # Check if the exact value is in the list (within a small tolerance)
-  exact_matches = [i for i, x in enumerate(data) if abs(x - value) <= tolerance]
+  idx = np.searchsorted(data, value)
 
-  if exact_matches:
-    exact_index = exact_matches[0]
-    print(f"\nExact value {value} found at index: {exact_index}")
-    return exact_index, value
+  if idx == 0:
+      closest_idx = 0
+  elif idx == len(data):
+      closest_idx = len(data) - 1
   else:
-    # If not exact match, find the nearest value
-    differences = [abs(x - value) for x in data]
-    nearest_index = differences.index(min(differences))
-    nearest_value = data[nearest_index]
-    print(f"\nExact value {value} not found.")
-    print(f"Nearest value found is {nearest_value} at index: {nearest_index}")
-    return nearest_index, nearest_value
+      closest_idx = idx if abs(data[idx] - value) < abs(data[idx - 1] - value) else idx - 1
+
+  exact_index = closest_idx if abs(data[closest_idx] - value) <= tolerance else None
+  if exact_index == None:
+    sys.exit('The difference between original and chosen value is greater than tolerance, choose another value')
+  else:
+    return exact_index
+ 
 
 
-def statistical_quantities_calc(sqlcon, all_tab_names):
-  """ (sqlite3.connections, list of strings)
-      Get column values from the tables 'all_tab_names' in the database connected by
-     'sqlcon'.
+def statistical_quantities_calc(sqlcon, all_tab_names, choice, start_value=None, end_value=None, tolerance=None):
+  """ (sqlite3.connection, list of strings, int, float, float, float)
+      Get column values from the tables 'all_tab_names' in the database connected by  'sqlcon'.
 
-      Calculates statistical quantities for entire columns or just a sample and stores all the values
-      to database
-
-      Before using this function make sure to use the function: tracking_multiple_data_to_db(dbname, input_files)
-      if there is no instantaneous velocity data in a database
+      choice 1: Calculates statistical quantities for entire data or 
+      choice 2: Calculates statistical quantities from 'start_value' to 'end_value' if these values are within the 'tolerance' limit of actual values in data
+      Before using this function make sure to use the function: tracking_multiple_data_to_db(dbname, input_files)  if there is no data in a database
   """
+  import sys
   import math
+  logging.basicConfig(level=logging.INFO)
   for table in all_tab_names:
     header_names = ['time', 'velocity_phy_01', 'velocity_phy_02', 'velocity_phy_03']
-    # get_columns, a function inside gleaner which extracts values of each column from sql database
     t, u, v, w = get_columns(sqlcon, tabname=table,
                                      columns=header_names)
-    print(f"\nCalculate statistical quantities for {table}")
-    while True:
-
-      print("Choose your choice for calculating statistical quantities"
-            "\nChoice 1: Calculate statistical quantities for the entire columns of data"
-            "\nChoice 2: Calculate statistical quantities for a sample (a portion of columns) by specifying "
-            "start and end time")
-
-      choice = int(input("\nSelect your choice (Type 1 or 2): "))
-      match choice:
-        case 1:
-          print()
-          total_rows = len(u)
-          print("Entire columns of data are taken to calculate statistical quantities")
-          break
-        case 2:
-          try:
-            start_value = float(input("\nEnter the start time: "))
-            start_index, value_1 = find_index_of_value_or_nearest(t, start_value)
-            end_value = float(input("\nEnter the end time: "))
-            end_index, value_2 = find_index_of_value_or_nearest(t, end_value)
-
-          except ValueError:
-            print("Invalid input. Please try again.")
-
-
-          print(f'A sample of velocity data are taken from the {value_1:.4f} to {value_2:.4f} '
-                f'\nto calculate statistical quantities')
-          # Initialize variables
-
-          u = u[start_index:end_index + 1]
-          v = v[start_index:end_index + 1]
-          w = w[start_index:end_index + 1]
-          total_rows = len(u)
-          break
-
-        case _:
-          print("\nInvalid number. Try again")
+    logging.info(f"Calculation of statistical quantities for {table}")
+    match choice:
+      case 1:
+        total_rows = len(u)
+        logging.info("Entire columns of data are taken to calculate statistical quantities")
+        break
+      case 2:
+        start_index = find_index_of_value_or_nearest(t, start_value, tolerance)
+        end_index = find_index_of_value_or_nearest(t, end_value, tolerance)
+        u = u[start_index:end_index + 1]
+        v = v[start_index:end_index + 1]
+        w = w[start_index:end_index + 1]
+        total_rows = len(u)
+        break
+      case _:
+        logging.info("Invalid number. Try again")
 
     inst_velocity_U = 0
     inst_velocity_V = 0
@@ -1441,19 +1407,19 @@ def statistical_quantities_calc(sqlcon, all_tab_names):
                 V_variance, W_variance, U_stdev, V_stdev, W_stdev, U_skew, V_skew, W_skew, U_kurtosis, V_kurtosis,
                 W_kurtosis, Reynolds_shear_stress_uv, Reynolds_shear_stress_uw, Reynolds_shear_stress_vw, TKE))
     sqlcon.commit()
-    print("--------------------------------------------------------------------------------------------------------")
+    logging.info("---------------------------------------------------------------------------------------------")
 
 
 # Fast fourier transform of instantaneous velocities calculation and creation of amplitude spectra
-def fft_velocities_calc(sqlcon, all_tab_names):
-  """ (sqlite3.connections, list of strings)
+def fft_velocities_calc(sqlcon, all_tab_names, percentage, frequency):
+  """ (sqlite3.connections, list of strings, float, int)
       Get 'columns' from the tables 'all_tab_names' in the database connected by'sqlcon'.
-      Calculates FFT of data, generates amplitude spectra and stores in a folder
-
+      Calculates FFT of data for the 'percentage' of samples and 'frequency', and 
+      generates amplitude spectra and stores in a folder
       Before using this function make sure to use the function: tracking_multiple_data_to_db(dbname, input_files)
       if there is no instantaneous velocity data in a database
   """
-
+  logging.basicConfig(level=logging.INFO)      
   import matplotlib.pyplot as plt
   from scipy.fftpack import fft
   from matplotlib import rc
@@ -1470,21 +1436,16 @@ def fft_velocities_calc(sqlcon, all_tab_names):
     all_fft_tables.append(fft_folder)
     if not os.path.exists(f'{fft_folder}'):
       os.makedirs(f'{fft_folder}')
-      print(f'\n{fft_folder} folder created')
-    print(f"\n Calculating FFT for the instantaneous velocties (u,v,w) from the table:{name}")
+      logging.info(f'\n{fft_folder} folder created')
+    logging.info(f"\n Calculating FFT for the instantaneous velocties (u,v,w) from the table:{name}")
 
     t, column_as_array_U, column_as_array_V, column_as_array_W = get_columns(sqlcon, tabname=name,
                                                                                      columns=column_header,
                                                                                      as_nparray=True)
-    percentage = float(
-      input(
-        "Enter the % number of samples for FFT Calculation (default 100 percent). Press Enter to accept default : ")
-      or "100")
     t_iter = np.subtract(t[2], t[1])
     freq_from_data = round(1 / t_iter)
-    print(f"Recommended sampling frequency for {name}:", freq_from_data)
-    frequency = int(input("Enter the sampling frequency: "))
-    print(f"\nTaking the instantaneous velocity values from table:{name} ")
+    logging.info(f"Recommended sampling frequency for {name}:", freq_from_data)
+    logging.info(f"\nTaking the instantaneous velocity values from table:{name} ")
 
     array_size = column_as_array_U.size
 
@@ -1601,9 +1562,8 @@ def fft_velocities_calc(sqlcon, all_tab_names):
     # === STEP 4: Commit and close ===
     sqlcon.commit()
 
-    print(f"\nProcessing complete. Calculated Fast Fourier Transform of velocities, generated plots of spectra and "
-          f"\nthey are saved to the folder {fft_folder}")
-    print("--------------------------------------------------------------------------------------------------------")
+    logging.info(f"Calculated FFT of velocities, generated plots of spectra and saved to the folder {fft_folder}")
+    logging.info("---------------------------------------------------------------------------------------------")
 ######################################################################################################################
 
 
@@ -1612,7 +1572,7 @@ def cumulative_mean_var_calc(sqlcon, all_tab_names):
   """ (sqlite3.Connection, list of strings)
       Get column values from the tables 'all_tab_names' in the database connected by 'sqlcon'
 
-      Calculates cumulative means and variances and data are stored in each table names
+      Calculates cumulative means and variances and data are stored in each table in the database
 
       Before using this function make sure to use the function: tracking_multiple_data_to_db(dbname, input_files)
       if there is no instantaneous velocity data in a database
@@ -1697,7 +1657,7 @@ def plot_cumulative_mean_var(sqlcon, all_tab_names):
   import matplotlib.pyplot as plt
   import matplotlib.ticker as ticker
   import os
-
+  logging.basicConfig(level=logging.INFO)
   no_of_files = len(all_tab_names)
   col_head = ['velocity_phy_01', 'velocity_phy_02', 'velocity_phy_03']
   cum_col_head = ['time', 'Mean_U', 'Mean_V', 'Mean_W', 'Variance_U', 'Variance_V', 'Variance_W']
@@ -1711,7 +1671,7 @@ def plot_cumulative_mean_var(sqlcon, all_tab_names):
     data_folder_ind = f"Cumu_{table}"
     if not os.path.exists(f'{data_folder_ind}'):
       os.makedirs(f'{data_folder_ind}')
-      print(f'\n{data_folder_ind} folder created')
+      logging.info(f'\n{data_folder_ind} folder created')
 
     all_data_folders.append(data_folder_ind)
 
@@ -1763,55 +1723,53 @@ def plot_cumulative_mean_var(sqlcon, all_tab_names):
       ax3.tick_params(axis='y', labelcolor=color)
       fig2.savefig(f"{data_folder_ind}/{table}_{i_dir}.jpg", dpi=300)
       plt.close(fig2)
-    print(f'Plots are stored in the folder: Cumu_{table}')
-  print('-------------------------------------------------------------------------------------------------------')
+    logging.info(f'Plots are stored in the folder: Cumu_{table}')
+  logging.info('---------------------------------------------------------------------------------------------')
 ######################################################################################################################
 
 
 ################# Simple moving averages and variances calculation and creation of plots #############################
-def simple_moving_avg_var_calc(sqlcon, all_tab_names):
-  """ (sqlite3.Connection, list of strings)
+def simple_moving_avg_var_calc(sqlcon, all_tab_names, window_size, check_plot = True):
+  """ (sqlite3.Connection, list of strings, bool)
       Get column values from the tables 'all_tab_names' in the database connected by 'sqlcon'
 
-      Calculates simple moving means and variances and data are stored in each table names
-
+      Calculates the means and variances of the data in moving window of size 
+      'window_size 'and are stored in each table in database. 'check_plot' shows the
+      averaged plot also used to check whether the chosen window size is sufficient
       Before using this function make sure to use the function: tracking_multiple_data_to_db(dbname, input_files)
       if there is no instantaneous velocity data in a database
   """
   import matplotlib.pyplot as plt
   import numpy as np
   import matplotlib.ticker as ticker
-
+  logging.basicConfig(level=logging.INFO)
   no_of_files = len(all_tab_names)
   col_head = ['time', 'velocity_phy_01', 'velocity_phy_02', 'velocity_phy_03']
   for table, i in zip(all_tab_names, range(no_of_files)):
     t, u, v, w = get_columns(sqlcon, tabname=table, columns=col_head)
-    print(f'No. of instances of U-velocity for {table}:', len(u))
+    logging.info(f'No. of instances of U-velocity for {table}:', len(u))
 
-    while True:
+    len_u = len(u)
+    length = len_u - window_size + 1
+    t_red = t[window_size - 1:len_u]
+    
+    u_mean = []
+    u_var = []
+        
+    for i in range(length):
+      a = i
+      b = window_size + i
+      win_avg = np.average(u[a:b])
+      win_avg = np.round(win_avg, 6)
+      u_mean.append(win_avg)
 
-      window_size = int(input(f"\nEnter the window size for the {table}:"))
-
-      len_u = len(u)
-      length = len_u - window_size + 1
-
-      u_mean = []
-      u_var = []
-      for i in range(length):
-        a = i
-        b = window_size + i
-        win_avg = np.average(u[a:b])
-        win_avg = np.round(win_avg, 6)
-        u_mean.append(win_avg)
-
-        u_fluc = np.subtract(u[a:b], win_avg)
-        u_prime_sq = u_fluc * u_fluc
-        u_prime_sq_avg = np.average(u_prime_sq)
-        u_prime_sq_avg = np.round(u_prime_sq_avg, 6)
-        u_var.append(u_prime_sq_avg)
-
-      t_red = t[window_size - 1:len_u]
-
+      u_fluc = np.subtract(u[a:b], win_avg)
+      u_prime_sq = u_fluc * u_fluc
+      u_prime_sq_avg = np.average(u_prime_sq)
+      u_prime_sq_avg = np.round(u_prime_sq_avg, 6)
+      u_var.append(u_prime_sq_avg)     
+    
+    if check_plot == True:
       fig, ax = plt.subplots()
       ax.plot(t, u, color="tab:blue", label=r'Inst. velocity-$U$')
       ax.plot(t_red, u_mean, color="r", label=r'Mean velocity-$\overline{U}$')
@@ -1822,27 +1780,15 @@ def simple_moving_avg_var_calc(sqlcon, all_tab_names):
       ax.grid(axis='x')
       plt.show()
       plt.close(fig)
-
-      print("Is the Mean velocity-U plot and the chosen window size okay?. Select the choices below")
-      print("Choice 1: Yes. Proceed to calculate mean and variance from Inst. velocity-V and W")
-      print("Choice 2: No. Change the window size and create Mean velocity-U plot again")
-      choice = int(input("\nSelect your choice (Type 1 or 2): "))
-      match choice:
-        case 1:
-          print("Proceeded to calculate mean and variance from Inst. velocity-V and W")
-          break
-        case 2:
-          print("Okay. Change the window size.")
-        case _:
-          print("\nInvalid number. Try again")
-
+    
     v_mean = []
     v_var = []
     w_mean = []
     w_var = []
+    
     for i in range(length):
       a = i
-      b = window_size + i
+      b = window_size + i     
       win_avg = np.average(v[a:b])
       win_avg = np.round(win_avg, 6)
       v_mean.append(win_avg)
@@ -1898,7 +1844,7 @@ def plot_simple_moving_avg_var(sqlcon, all_tab_names):
   import matplotlib.pyplot as plt
   import matplotlib.ticker as ticker
   import os
-
+  logging.basicConfig(level=logging.INFO)
   no_of_files = len(all_tab_names)
   moving_col_head = ['time_red', 'Mean_U', 'Mean_V', 'Mean_W', 'Variance_U', 'Variance_V', 'Variance_W']
   col_head = ['time', 'velocity_phy_01', 'velocity_phy_02', 'velocity_phy_03']
@@ -1912,7 +1858,7 @@ def plot_simple_moving_avg_var(sqlcon, all_tab_names):
     data_folder_ind = f"Sma_{table}"
     if not os.path.exists(f'{data_folder_ind}'):
       os.makedirs(f'{data_folder_ind}')
-      print(f'\n{data_folder_ind} folder created')
+      logging.info(f'\n{data_folder_ind} folder created')
 
     all_data_folders.append(data_folder_ind)
 
@@ -1962,8 +1908,8 @@ def plot_simple_moving_avg_var(sqlcon, all_tab_names):
       ax3.tick_params(axis='y', labelcolor=color)
       fig2.savefig(f"{data_folder_ind}/{table}_{i_dir}.jpg", dpi=300)
       plt.close(fig2)
-    print(f'Plots are stored in the folder: Sma_{table}')
-  print('-------------------------------------------------------------------------------------------------------')
+    logging.info(f'Plots are stored in the folder: Sma_{table}')
+  logging.info('---------------------------------------------------------------------------------------------')
 ######################################################################################################################
 
 
@@ -2030,8 +1976,6 @@ def all_fourier_calculations(total_rows, U, V, W, M):
     ak_list_W.append(ak_W)
     bk_list_W.append(bk_W)
 
-  # print ak_list_U, bk_list_U, ak_list_V, bk_list_V, ak_list_W, bk_list_W,
-
   for j in range(0, total_rows):
     # print "---------------\nIteration Number J = %d" %(j)
     for k in range(1, int((M - 1) / 2) + 1):
@@ -2056,35 +2000,29 @@ def all_fourier_calculations(total_rows, U, V, W, M):
 
 
 # Use this function for calculation of fourier means and variances
-def fourier_mean_var_calc(sqlcon, all_tab_names):
-  """ (sqlite3.Connection, list of strings)
+def fourier_mean_var_calc(sqlcon, all_tab_names, M, check_plot = True):
+  """ (sqlite3.Connection, list of strings, int, bool)
       Get column values from the tables 'all_tab_names' in the database connected by 'sqlcon'
 
-      Calculates fourier means and variances and data are stored in each table names
+      Calculates fourier means and variances based on fourier components, 'M' and data 
+      are stored in each table in database. M- strictly an odd number. 'check_plot' shows the 
+      averaged plot also used to check whether the chosen M is sufficent for the plot
 
       Before using this function make sure to use the function: tracking_multiple_data_to_db(dbname, input_files)
       if there is no instantaneous velocity data in a database
     """
   import matplotlib.pyplot as plt
   import matplotlib.ticker as ticker
-
+  logging.basicConfig(level=logging.INFO)
   no_of_files = len(all_tab_names)
   col_head = ['time', 'velocity_phy_01', 'velocity_phy_02', 'velocity_phy_03']
   for table, i in zip(all_tab_names, range(no_of_files)):
     t, u, v, w = get_columns(sqlcon, tabname=table, columns=col_head)
     total_rows = len(u)
-    print(f'No. of instances of U-velocity for {table}:', total_rows)
-
-    while True:
-
-      # Taking No. of Fourier components as input from user
-      M = int(input("Unsteady flow: Enter the value of k, i.e. # of Fourier Components : "))
-      while (M % 2 != 1):
-        print("The Value of k should be strictly odd")
-        M = int(input("Enter the value of k, i.e. # of Fourier Components : "))
-
-      U_avg, V_avg, W_avg = all_fourier_calculations(total_rows, u, v, w, M)
-
+    logging.info(f'No. of instances of U-velocity for {table}:', total_rows)
+    U_avg, V_avg, W_avg = all_fourier_calculations(total_rows, u, v, w, M)
+    
+    if check_plot == True:
       fig, ax = plt.subplots()
       ax.plot(t, u, color="b", label=r'Inst. Velocity-$U$')
       ax.plot(t, U_avg, color="r", label=r'Mean Velocity-$\overline{U}$')
@@ -2095,21 +2033,6 @@ def fourier_mean_var_calc(sqlcon, all_tab_names):
       ax.grid(axis='x')
       plt.show()
       plt.close(fig)
-
-      print("Is the Mean velocity-U plot and the chosen No. of fourier components (k) okay? "
-            "\nSelect the choices below")
-      print("Choice 1: Yes. Proceed to calculate mean velocities V and W plots and Variances")
-      print("Choice 2: No. Need to change the No. of fourier components (k) and create "
-            "Mean velocity-U plot again")
-      choice = int(input("\nSelect your choice (Type 1 or 2): "))
-      match choice:
-        case 1:
-          print("Proceeded to calculate mean velocities V and W and Variances")
-          break
-        case 2:
-          print("Okay. Change the No. of fourier components (k)")
-        case _:
-          print("\nInvalid number. Try again")
 
     # plot fourier average and variances
     U_prime_U_prime = []
@@ -2158,7 +2081,7 @@ def plot_fourier_mean_var(sqlcon, all_tab_names):
   import matplotlib.pyplot as plt
   import matplotlib.ticker as ticker
   import os
-
+  logging.basicConfig(level=logging.INFO) 
   no_of_files = len(all_tab_names)
   fourier_col_head = ['time', 'Mean_U', 'Mean_V', 'Mean_W', 'Variance_U', 'Variance_V', 'Variance_W']
   col_head = ['velocity_phy_01', 'velocity_phy_02', 'velocity_phy_03']
@@ -2181,7 +2104,7 @@ def plot_fourier_mean_var(sqlcon, all_tab_names):
     data_folder_ind = f"Fourier_{table}"
     if not os.path.exists(f'{data_folder_ind}'):
       os.makedirs(f'{data_folder_ind}')
-      print(f'\n{data_folder_ind} folder created')
+      logging.info(f'\n{data_folder_ind} folder created')
 
     all_data_folders.append(data_folder_ind)
 
@@ -2224,5 +2147,5 @@ def plot_fourier_mean_var(sqlcon, all_tab_names):
       ax3.tick_params(axis='y', labelcolor=color)
       fig2.savefig(f"{data_folder_ind}/{table}_{i_dir}.jpg", dpi=300)
       plt.close(fig2)
-    print(f'Plots are stored in the folder: Fourier_{table}')
-  print('-------------------------------------------------------------------------------------------------------')
+    logging.info(f'Plots are stored in the folder: Fourier_{table}')
+  logging.info('----------------------------------------------------------------------------------------------')

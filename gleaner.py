@@ -1170,36 +1170,25 @@ def strong_efficiency(perfmap, total_size, ppn=1, ref_perf=None,
 ######################## Tracking muliple ASCII files to database ######################################################
 def tracking_multiple_data_to_db(dbname, input_files):
   """ (string, string or list of strings)
-      input_files are ASCII files containing instantaneous velocities which are tracked to the
-      database: dbname under each table for each ASCII file.
-
-      Returns sqlcon (a sqlite3.Connection) to the database: dbname and all_tab_names
-      consisting of all table names of the database
-  """
+      dbname is the name of the database and input_files are file names of ASCII files 
+      
+      Each ASCII file data is tracked to each table in the database. 
+      Returns sqlcon, a sqlite3.Connection to the database and all_tab_names, a list of all table names of the database
+  """ 
   from pathlib import Path
   import sqlite3
   logging.basicConfig(level=logging.INFO)
-  logger = logging.getLogger(__name__)
   import os
-
+  
   all_tab_names = []
   sqlcon = sqlite3.connect(dbname)
-  for file, i in zip(input_files, range(len(input_files))):
+  for file in input_files:
     indv_file = Path(file).stem
-    indv_file = indv_file.replace('_p00000', '')
     all_tab_names.append(indv_file)
-    try:
-      if os.path.isfile(dbname):
-        cur = sqlcon.cursor()
-        drop_existing(cur, tabname=indv_file)
-        logger.info(f'Adding data to the database: {dbname}')
-        sqlcon = tracking_to_db(fname=file, dbname=dbname, tabname=indv_file)
-
-    except Exception as e:
-      logger.error(f"Error processing file {file}: {str(e)}")
-    ## -------------------------------------------------------------------------- ##
-
-  return sqlcon, all_tab_names
+    logging.info(f'Tracking data from the file: {file} to the database: {dbname}')
+    sqlcon = tracking_to_db(fname=file, dbname=dbname, tabname=indv_file)
+  
+  return sqlcon, all_tab_names  
 ######################################################################################################################
 
 
